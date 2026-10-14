@@ -220,17 +220,18 @@ svg{display:block}
 .sel-opt.dis:hover{background:none;color:#c0c4cc}
 .gen{width:100%}
 .unit-row{display:grid;grid-template-columns:1fr 84px;gap:8px}
-.stale{font-size:11px;color:var(--gray-400);margin-top:8px}
-.dim{opacity:.45}
-.gt-head,.gt-row{display:grid;grid-template-columns:76px 78px 1fr;gap:8px;align-items:center}
-.gt-head{font-size:11px;color:var(--gray-500);text-transform:uppercase;letter-spacing:.04em;margin-bottom:4px}
-.gt-row{padding:6px 0;border-top:1px solid var(--gray-100)}
-.gt-c{font-size:14px;font-weight:500;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
-.gt-v{display:flex;align-items:center;gap:4px}
-.gt-v .inp{padding:4px 6px;min-width:0}
-.gt-v .amp{font-size:10px;color:var(--gray-500)}
-.gt-v .pct{font-size:13px;color:var(--gray-500)}
-.gt-err{margin:0 0 4px 84px}
+.gt-head{font-size:11px;color:var(--gray-500);text-transform:uppercase;letter-spacing:.04em;margin-bottom:2px}
+.gt-item{padding:8px 0;border-top:1px solid var(--gray-100)}
+.gt-c{font-size:14px;font-weight:500;margin-bottom:6px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.gt-line{display:flex;align-items:center;gap:6px}
+.gt-op{width:76px;flex:none}
+.gt-op .sel-btn{min-width:0}
+.gt-line .inp{flex:1 1 0;min-width:0;padding:5px 8px}
+.gt-line .amp{font-size:11px;color:var(--gray-500);flex:none}
+.gt-line .pct{font-size:13px;color:var(--gray-500);flex:none;width:12px}
+/* tooltip (dark, like the product's material-tailwind Tooltip) */
+.tip{position:fixed;z-index:500;background:#1f2937;color:#fff;font-size:12px;line-height:1.4;padding:6px 10px;border-radius:6px;max-width:240px;pointer-events:none;box-shadow:0 4px 10px rgba(0,0,0,.15)}
+.lbl .info{cursor:help}
 </style>
 </head>
 <body>
@@ -333,7 +334,7 @@ svg{display:block}
     </ul>
     <div class="brush-pop" id="brushPop" hidden>
       <span class="pen"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 19l7-7 3 3-7 7-3-3z"/><path d="M18 13l-1.5-7.5L2 2l3.5 14.5L13 18l5-5z"/></svg>Pen</span>
-      <label for="brushSize">Size</label><input id="brushSize" type="range" min="4" max="200" step="2" value="40"><span class="v" id="brushVal">40 px</span>
+      <label for="brushSize">Size</label><input id="brushSize" type="range" min="2" max="200" step="2" value="6"><span class="v" id="brushVal">6 px</span>
     </div>
   </footer>
 </div>
@@ -381,7 +382,9 @@ const S = {
   nextId: 3,
   activeClass: null,
   draft: null,
-  brush: 40,
+  brush: 6,
+  hover: null,              // brush cursor position (master px) while labelling
+  generated: false,         // after the first "Generate", details update live
   flash: null,
   details: null,            // result of "Generate Processing Details"
   ratio: '',
@@ -450,8 +453,9 @@ function segBBox(sh) {
 /* =========================================================
    Generate Processing Details
    Picks the LARGEST crop at which the smallest drawn anomaly is still detectable.
-   Larger crop = fewer crops = faster. Anomalies thinner than the model's need
-   at the smallest 512 px crop are flagged as undetectable.
+   Smaller anomaly -> smaller crop -> more crops -> longer inference.
+   Anomalies thinner than the model's need even at the smallest 512 px crop are
+   flagged as undetectable (live, as soon as they are confirmed).
    ========================================================= */
 function cropDims(c) { const a = sa(); return c === 'full' ? [a.w, a.h] : [Math.min(c, a.w), Math.min(c, a.h)]; }
 function minPxFor(c, m = model()) { const [w, h] = cropDims(c), s = Math.min(1, MODEL_IN / w, MODEL_IN / h); return Math.ceil(m.need / s - 1e-9); }
@@ -460,24 +464,24 @@ function boxAxis(len, box, ov) {
   const n = Math.ceil((len - box) / (box - ov)) + 1, st = (len - box) / (n - 1);
   return Array.from({length: n}, (_, i) => Math.round(i * st));
 }
-const signature = () => JSON.stringify([S.modelId, S.saId, S.labels.map(l => [l.id, segDims(l.shape)[0]])]);
+// too small for the selected model even at the smallest crop (512 px, no downscaling)
+const tooSmall = l => segDims(l.shape)[0] < minPxFor(CROPS[0]);
+const flaggedNow = () => S.labels.filter(tooSmall);
+const labelNo = l => S.labels.indexOf(l) + 1;
 function generate() {
+  if (!S.labels.length) { S.details = null; return; }
   const m = model(), a = sa();
-  const widths = S.labels.map(l => ({id: l.id, w: segDims(l.shape)[0]}));
-  const flagged = widths.filter(x => x.w < minPxFor(CROPS[0], m)).map(x => x.id);
-  const ok = widths.filter(x => !flagged.includes(x.id));
-  const smallest = ok.length ? Math.min(...ok.map(x => x.w)) : 0;
+  const smallest = Math.min(...S.labels.map(l => segDims(l.shape)[0]));
   const cands = [...CROPS.filter(c => c < Math.max(a.w, a.h)), 'full'];
-  let crop = CROPS[0];
-  if (ok.length) cands.forEach(c => { if (minPxFor(c, m) <= smallest) crop = c; });
+  let crop = CROPS[0];                                   // smallest crop when even 512 is not enough
+  cands.forEach(c => { if (minPxFor(c, m) <= smallest) crop = c; });
   const [cw, ch] = cropDims(crop), minPx = minPxFor(crop, m), ov = minPx;
   const xs = crop === 'full' ? [0] : boxAxis(a.w, cw, ov), ys = crop === 'full' ? [0] : boxAxis(a.h, ch, ov);
   const n = xs.length * ys.length;
   const ms = m.first + m.extra * (n - 1) + PREP_MS_PER_MP * a.w * a.h / 1e6;
-  S.details = {sig: signature(), crop, cw, ch, minPx, ov, xs, ys, n, ms, flagged, smallest};
+  S.details = {crop, cw, ch, minPx, ov, xs, ys, n, ms, smallest};
 }
-const stale = () => S.details && S.details.sig !== signature();
-const flaggedNow = () => S.details && !stale() ? S.labels.filter(l => S.details.flagged.includes(l.id)) : [];
+const refresh = () => { if (S.generated) generate(); };
 
 /* ---------- class colours (name hash, like ClassChip) ---------- */
 function hue(name) { let h = 0; for (const ch of name) h = (h * 31 + ch.charCodeAt(0)) % 360; return h; }
@@ -555,17 +559,28 @@ function drawCanvas() {
   ctx.drawImage(blurred, 0, 0, w, h);
   ctx.save(); maskPath(ctx, k); ctx.clip(); ctx.drawImage(sharp, 0, 0, w, h); ctx.restore();
   const d = S.details;
-  if (d && !stale() && d.crop !== 'full') {
+  if (d && d.crop !== 'full') {
     ctx.save(); ctx.setLineDash([4, 3]); ctx.lineWidth = 1; ctx.strokeStyle = 'rgba(224,71,58,.95)';
     d.ys.forEach(y => d.xs.forEach(x => ctx.strokeRect((a.x + x) * k + .5, (a.y + y) * k + .5, d.cw * k - 1, d.ch * k - 1)));
     ctx.restore();
   }
-  const bad = new Set(flaggedNow().map(l => l.id));
   S.labels.forEach(l => {
-    paintShape(ctx, l.shape, k, clsColor(l.cls), bad.has(l.id) ? '#ef4444' : clsColor(l.cls));
+    const bad = tooSmall(l);
+    paintShape(ctx, l.shape, k, bad ? '#ef4444' : clsColor(l.cls), bad ? '#ef4444' : clsColor(l.cls));
+    if (bad) {                                  // red ring so even a dot is easy to find
+      const b = segBBox(l.shape), cx = (b[0] + b[2]) / 2 * k, cy = (b[1] + b[3]) / 2 * k;
+      const r = Math.max(11, Math.hypot(b[2] - b[0], b[3] - b[1]) / 2 * k + 6);
+      ctx.save(); ctx.beginPath(); ctx.arc(cx, cy, r, 0, Math.PI * 2);
+      ctx.fillStyle = 'rgba(239,68,68,.18)'; ctx.fill(); ctx.lineWidth = 2; ctx.strokeStyle = '#ef4444'; ctx.stroke(); ctx.restore();
+    }
     if (S.flash === l.id) { const b = segBBox(l.shape); ctx.save(); ctx.strokeStyle = '#16a34a'; ctx.lineWidth = 2; ctx.strokeRect(b[0] * k - 5, b[1] * k - 5, (b[2] - b[0]) * k + 10, (b[3] - b[1]) * k + 10); ctx.restore(); }
   });
   if (S.draft && S.activeClass) paintShape(ctx, S.draft, k, clsColor(S.activeClass), '#ffffff');
+  if (S.hover && S.activeClass && !painting) {   // brush footprint cursor
+    const r = Math.max(2.5, S.brush / 2 * k);
+    ctx.save(); ctx.beginPath(); ctx.arc(S.hover[0] * k, S.hover[1] * k, r, 0, Math.PI * 2);
+    ctx.lineWidth = 1.5; ctx.strokeStyle = '#fff'; ctx.stroke(); ctx.lineWidth = .75; ctx.strokeStyle = '#111'; ctx.stroke(); ctx.restore();
+  }
 }
 let painting = null;
 function toMaster(e) {
@@ -580,6 +595,11 @@ cv.addEventListener('mousedown', e => {
   painting = {pts: [[x, y]], w: S.brush}; S.draft.strokes.push(painting);
   drawCanvas(); e.preventDefault();
 });
+cv.addEventListener('mousemove', e => {
+  if (painting || !S.activeClass) return;
+  const [x, y, inside] = toMaster(e); S.hover = inside ? [x, y] : null; drawCanvas();
+});
+cv.addEventListener('mouseleave', () => { if (S.hover) { S.hover = null; drawCanvas(); } });
 window.addEventListener('mousemove', e => {
   if (!painting) return;
   const [x, y] = toMaster(e), last = painting.pts[painting.pts.length - 1];
@@ -617,7 +637,27 @@ function renderTree() {
    Custom select (SelectInput look) with a portal list
    ========================================================= */
 let openList = null;
-function closeList() { if (openList) { openList.remove(); openList = null; } }
+function closeList() { if (openList) { openList.remove(); openList = null; } hideTip(); }
+
+/* ---------- tooltip for anything with data-tip ---------- */
+const tipEl = document.createElement('div'); tipEl.className = 'tip'; tipEl.hidden = true; tipEl.setAttribute('role', 'tooltip'); document.body.appendChild(tipEl);
+function hideTip() { tipEl.hidden = true; }
+document.addEventListener('mouseover', e => {
+  const t = e.target.closest && e.target.closest('[data-tip]');
+  if (!t || !t.dataset.tip) return hideTip();
+  tipEl.textContent = t.dataset.tip; tipEl.hidden = false;
+  const r = t.getBoundingClientRect(), tw = tipEl.offsetWidth, th = tipEl.offsetHeight;
+  let x, y;
+  if (t.classList.contains('sel-opt')) {                       // beside a dropdown option
+    x = r.right + 8; if (x + tw > innerWidth - 8) x = r.left - tw - 8;
+    y = r.top + r.height / 2 - th / 2;
+  } else {                                                     // above an icon
+    x = Math.min(innerWidth - tw - 8, Math.max(8, r.left + r.width / 2 - tw / 2));
+    y = r.top - th - 8; if (y < 8) y = r.bottom + 8;
+  }
+  tipEl.style.left = x + 'px'; tipEl.style.top = y + 'px';
+});
+document.addEventListener('focusin', e => { const t = e.target.closest && e.target.closest('[data-tip]'); if (!t) hideTip(); });
 document.addEventListener('mousedown', e => { if (openList && !openList.contains(e.target) && !e.target.closest('.sel-btn,.ms')) closeList(); });
 document.addEventListener('scroll', e => { if (openList && !openList.contains(e.target)) closeList(); }, true);
 function selHTML(key, value, options, {ph = 'Select', sm = false, disabled = false} = {}) {
@@ -628,14 +668,14 @@ function openSelect(btn, options, value, onPick) {
   closeList();
   const r = btn.getBoundingClientRect(), l = document.createElement('div');
   l.className = 'sel-list'; l.style.left = r.left + 'px'; l.style.minWidth = r.width + 'px';
-  l.innerHTML = options.map(o => `<div class="sel-opt ${o.disabled ? 'dis' : ''}" data-v="${esc(o.id)}" ${o.tip ? `title="${esc(o.tip)}"` : ''}>${String(o.id) === String(value) ? '<span class="tick">✓</span>' : ''}${esc(o.name)}</div>`).join('') || '<div class="sel-opt" style="color:#999;cursor:default">No options</div>';
+  l.innerHTML = options.map(o => `<div class="sel-opt ${o.disabled ? 'dis' : ''}" data-v="${esc(o.id)}" ${o.tip ? `data-tip="${esc(o.tip)}" aria-disabled="true"` : ''}>${String(o.id) === String(value) ? '<span class="tick">✓</span>' : ''}${esc(o.name)}</div>`).join('') || '<div class="sel-opt" style="color:#999;cursor:default">No options</div>';
   l.onclick = e => { const o = e.target.closest('[data-v]'); if (!o || o.classList.contains('dis')) return; closeList(); onPick(o.dataset.v); };
   document.body.appendChild(l); openList = l;
   const lh = l.offsetHeight;
   l.style.top = (r.bottom + 4 + lh > innerHeight ? r.top - lh - 4 : r.bottom + 4) + 'px';
 }
 const unitOptions = () => {
-  const off = !ratioOk(), tip = 'Enter the pixel to mm ratio to use this unit';
+  const off = !ratioOk(), tip = 'Enter the Ratio (pixel to mm) below to use this unit';
   return [{id: 'px', name: 'px'}, {id: 'mm', name: 'mm', disabled: off, tip: off ? tip : ''}, {id: 'um', name: 'µm', disabled: off, tip: off ? tip : ''}];
 };
 
@@ -650,6 +690,7 @@ function renderPanel() {
   renderBody();
 }
 function renderBody() {
+  refresh();
   const b = $('#body'), keep = b.scrollTop;
   b.innerHTML = S.step === 0 ? stepInputs() : S.step === 1 ? stepSetup() : stepOutputs();
   b.scrollTop = keep;
@@ -657,7 +698,8 @@ function renderBody() {
 }
 // re-render the parts that depend on labels / ratio / unit, leaving inputs in place so they keep focus
 function renderDynamic() {
-  if (S.step !== 1 || !$('#lblDyn')) return renderBody();
+  if (S.step !== 1 || !$('#lblDyn') || !$('#procDyn')) return renderBody();
+  refresh();
   $('#lblDyn').innerHTML = labelsBlock();
   $('#procDyn').innerHTML = procDynamic();
   const bad = Number.isNaN(ratio()), r = $('#ratio');
@@ -684,7 +726,7 @@ function gtErr(g) {
 function setupBlocked() {
   if (!S.classes.length) return true;
   if (S.classes.some(c => !S.labels.some(l => l.cls === c))) return true;
-  if (!S.details || stale() || flaggedNow().length) return true;
+  if (!S.details || flaggedNow().length) return true;
   if (Number.isNaN(ratio())) return true;
   return S.classes.some(c => gtErr(S.gt[c]));
 }
@@ -701,7 +743,7 @@ function stepInputs() {
 
 function labelsBlock() {
   if (!S.classes.length) return `<div style="font-size:14px;color:#f87171">Select at least one class from the dropdown to label it.</div>`;
-  const a = sa(), bad = new Set(flaggedNow().map(l => l.id));
+  const a = sa(), flagged = flaggedNow(), bad = new Set(flagged.map(l => l.id));
   let h = `<div style="font-size:14px;font-weight:500">Click the classes below to label them in the search area:</div>
     <div class="chips">${S.classes.map(n => `<button class="cchip ${S.activeClass === n ? 'on' : ''}" data-chip="${esc(n)}" style="color:${clsColor(n)};background:${clsColor(n, .2)};border-color:${clsColor(n, .45)}">${esc(n)}</button>`).join('')}</div>`;
   if (S.activeClass) h += `<div class="confirm-bar"><button class="btn btn-b btn-sm" data-act="cancelDraw">Cancel</button><button class="btn btn-p btn-sm" data-act="confirmDraw" ${S.draft && S.draft.strokes.length ? '' : 'disabled'}>Confirm</button></div>`;
@@ -713,14 +755,21 @@ function labelsBlock() {
       : `W ${inUnit(wd)} × L ${inUnit(ln)} · ${pct < 0.01 ? '<0.01' : pct.toFixed(2)}% of search area`;
     h += `<div class="lrow ${isBad ? 'bad' : ''}">
       <div class="top"><span>${i + 1}.</span>${selHTML('lc' + l.id, l.cls, S.classes.map(n => ({id: n, name: n})), {sm: true})}
-      <span class="ic"><button data-act="view" data-id="${l.id}" title="View" aria-label="View label"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/></svg></button><button title="Edit" aria-label="Edit label"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7"/><path d="M18.5 2.5a2.12 2.12 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z"/></svg></button><button data-act="del" data-id="${l.id}" title="Delete" aria-label="Delete label"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M3 6h18M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/></svg></button></span></div>
+      <span class="ic"><button data-act="view" data-id="${l.id}" aria-label="View label"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/></svg></button><button aria-label="Edit label"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7"/><path d="M18.5 2.5a2.12 2.12 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z"/></svg></button><button data-act="del" data-id="${l.id}" aria-label="Delete label"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M3 6h18M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/></svg></button></span></div>
       <div class="sz">${esc(msg)}</div></div>`;
   });
+  if (flagged.length) h += `<div class="alert" role="alert">${smallMsg(flagged)}</div>`;
   return h + '</div>';
+}
+// "Label 3 (scratch) is too small …" / "Labels 3 and 4 are too small …"
+function smallMsg(list) {
+  const names = list.map(l => `${labelNo(l)} (${l.cls})`);
+  const joined = names.length === 1 ? names[0] : names.slice(0, -1).join(', ') + ' and ' + names[names.length - 1];
+  return `${plural(list.length, 'Label', 'Labels')} ${esc(joined)} ${plural(list.length, 'is', 'are')} too small to detect, even with the smallest 512 px crop. Remove or redraw ${plural(list.length, 'it', 'them')}.`;
 }
 
 const INFO_ICON = `<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><circle cx="12" cy="12" r="10"/><path d="M12 16v-4M12 8h.01"/></svg>`;
-const info = tip => `<span class="info" title="${esc(tip)}" aria-label="${esc(tip)}">${INFO_ICON}</span>`;
+const info = tip => `<span class="info" data-tip="${esc(tip)}" aria-label="${esc(tip)}" tabindex="0">${INFO_ICON}</span>`;
 
 // static part of Processing Details: the button and the ratio input (kept out of re-renders)
 function procBlock() {
@@ -737,33 +786,27 @@ function procBlock() {
 function procDynamic() {
   const d = S.details;
   if (!d) return S.labels.length ? '' : '<div class="hint mt8">Label at least one anomaly to generate processing details.</div>';
-  const m = model(), isStale = stale(), fl = flaggedNow();
+  const m = model();
   const cropTxt = d.crop === 'full' ? `${d.cw} × ${d.ch} px (entire search area)` : `${d.cw} × ${d.ch} px`;
   const minTip = `Each ${d.cw} × ${d.ch} px crop is resized to ${MODEL_IN} × ${MODEL_IN} px. An anomaly needs about ${m.need} px after resizing.`;
   const timeTip = `Rough estimate on a typical edge GPU for ${d.n} ${plural(d.n, 'crop', 'crops')}. Measure on the target PC.`;
-  let h = '';
-  if (isStale) h += `<div class="stale">Labels or model type changed — generate again.</div>`;
-  h += `<div class="${isStale ? 'dim' : ''}">
-    <div class="kv"><span>Crop size</span><b>${cropTxt}</b>${d.crop === 'full' ? '' : `<span>Overlap</span><b>≥ ${d.ov} px</b>`}<span>Crops per search area</span><b>${d.n}${d.n > 1 ? ` (${d.xs.length} × ${d.ys.length})` : ''}</b></div>
+  return `<div class="kv"><span>Crop size</span><b>${cropTxt}</b>${d.crop === 'full' ? '' : `<span>Overlap</span><b>≥ ${d.ov} px</b>`}<span>Crops per search area</span><b>${d.n}${d.n > 1 ? ` (${d.xs.length} × ${d.ys.length})` : ''}</b></div>
     <label class="lbl mt12">Inference time ${info(timeTip)}</label>
     <input class="inp" disabled value="${fmtTime(d.ms)}" aria-label="Inference time">
     <label class="lbl mt12">Minimum detectable anomaly ${info(minTip)}</label>
-    <div class="unit-row"><input class="inp" id="minVal" disabled value="${esc(inUnit(d.minPx).replace(/ (px|mm|µm)$/, ''))}" aria-label="Minimum detectable anomaly">${selHTML('unit', S.unit, unitOptions(), {})}</div>
-  </div>`;
-  if (!isStale && fl.length) h += `<div class="alert" role="alert">${fl.length} ${plural(fl.length, 'anomaly is', 'anomalies are')} too small to detect, even with the smallest 512 px crop. Remove or redraw ${plural(fl.length, 'it', 'them')}.</div>`;
-  return h;
+    <div class="unit-row"><input class="inp" id="minVal" disabled value="${esc(inUnit(d.minPx).replace(/ (px|mm|µm)$/, ''))}" aria-label="Minimum detectable anomaly">${selHTML('unit', S.unit, unitOptions(), {})}</div>`;
 }
 
 function gtBlock() {
   let h = `<div class="sec-t">Ground Truth Values</div><hr class="hr">`;
   if (!S.classes.length) return h + `<div class="hint">Select anomaly classes first.</div>`;
-  h += `<div class="gt-head"><span>Class</span><span>Condition</span><span>% of search area</span></div>`;
+  h += `<div class="gt-head">Condition for OK · % of search area</div>`;
   S.classes.forEach(c => {
     const g = S.gt[c] || (S.gt[c] = {op: 'eq', v: ['0', '']}), er = gtErr(g);
-    h += `<div class="gt-row"><span class="gt-c" style="color:${clsColor(c)}">${esc(c)}</span>
-      <div>${selHTML('gtop:' + c, g.op, OPS, {sm: true})}</div>
-      <div class="gt-v"><input class="inp" type="number" min="0" max="100" step="0.01" placeholder="Value" data-gt="${esc(c)}" data-k="0" value="${esc(g.v[0] ?? '')}">${g.op === 'between' ? `<span class="amp">&amp;</span><input class="inp" type="number" min="0" max="100" step="0.01" placeholder="Value" data-gt="${esc(c)}" data-k="1" value="${esc(g.v[1] ?? '')}">` : ''}<span class="pct">%</span></div></div>
-      ${er ? `<div class="err10 gt-err">${esc(er)}</div>` : ''}`;
+    const num = k => `<input class="inp" type="number" min="0" max="100" step="0.01" placeholder="Value" data-gt="${esc(c)}" data-k="${k}" value="${esc(g.v[k] ?? '')}" aria-label="${esc(c)} value${g.op === 'between' ? ' ' + (k + 1) : ''}">`;
+    h += `<div class="gt-item"><div class="gt-c" style="color:${clsColor(c)}">${esc(c)}</div>
+      <div class="gt-line"><div class="gt-op">${selHTML('gtop:' + c, g.op, OPS, {sm: true})}</div>${num(0)}${g.op === 'between' ? `<span class="amp">&amp;</span>${num(1)}` : ''}<span class="pct">%</span></div>
+      ${er ? `<div class="err10">${esc(er)}</div>` : ''}</div>`;
   });
   return h;
 }
@@ -773,7 +816,7 @@ function stepSetup() {
     <div class="ms" data-ms="1">${S.classes.map(n => `<span class="chip">${esc(n)}<button data-rm="${esc(n)}" aria-label="Remove ${esc(n)}">×</button></span>`).join('') || '<span class="ph">Select classes...</span>'}<span class="ar">▾</span></div>
     ${!S.classes.length ? '<div class="err">Please select at least 1 anomaly class.</div>' : ''}
     <label class="lbl b mt12">Model type</label>
-    <div class="radios col" role="radiogroup" aria-label="Model type">${MODELS.map(m => `<label class="rd"><input type="radio" name="model" value="${m.id}" ${S.modelId === m.id ? 'checked' : ''} ${S.classes.length ? '' : 'disabled'}><span class="c"></span>${esc(m.name)}</label>`).join('')}</div>
+    ${selHTML('model', S.modelId, MODELS.map(m => ({id: m.id, name: m.name})), {disabled: !S.classes.length})}
     <div class="divider" id="lblDyn">${labelsBlock()}</div>
     ${S.classes.length ? `<div class="divider" id="procSec">${procBlock()}</div>` : ''}
     <div class="divider" id="gtSec">${gtBlock()}</div>`;
@@ -796,6 +839,7 @@ body.addEventListener('click', e => {
     const k = sb.dataset.sel;
     if (k === 'sa') return openSelect(sb, SEARCH_AREAS.map(a => ({id: a.id, name: a.name})), S.saId, v => { S.saId = v; renderBody(); drawCanvas(); });
     if (k === 'unit') return openSelect(sb, unitOptions(), S.unit, v => { S.unit = v; renderDynamic(); });
+    if (k === 'model') return openSelect(sb, MODELS.map(m => ({id: m.id, name: m.name})), S.modelId, v => { S.modelId = v; renderBody(); drawCanvas(); });
     if (k.startsWith('gtop:')) { const c = k.slice(5); return openSelect(sb, OPS, S.gt[c].op, v => { S.gt[c].op = v; renderBody(); }); }
     if (k.startsWith('lc')) { const id = +k.slice(2); return openSelect(sb, S.classes.map(n => ({id: n, name: n})), S.labels.find(l => l.id === id).cls, v => { S.labels.find(l => l.id === id).cls = v; S.labelsChanged = true; renderBody(); drawCanvas(); }); }
   }
@@ -824,13 +868,16 @@ body.addEventListener('click', e => {
   const a = act.dataset.act;
   if (a === 'gen') {
     if (S.draft && S.draft.strokes.length) return toast('Confirm annotation to proceed');
-    generate(); $('#ratioWrap').hidden = false; renderDynamic(); drawCanvas(); return;
+    S.generated = true; generate(); $('#ratioWrap').hidden = false; renderDynamic(); drawCanvas(); return;
   }
   if (a === 'cancelDraw') { S.draft = null; S.activeClass = null; renderDynamic(); drawCanvas(); return; }
   if (a === 'confirmDraw' && S.draft && S.draft.strokes.length) {
-    S.labels.push({id: S.nextId++, cls: S.activeClass, shape: S.draft}); S.draft = null; S.labelsChanged = true;
+    const nl = {id: S.nextId++, cls: S.activeClass, shape: S.draft};
+    S.labels.push(nl); S.draft = null; S.labelsChanged = true;
     const g = $('[data-act="gen"]'); if (g) g.disabled = false;
-    renderDynamic(); drawCanvas(); return;
+    renderDynamic(); drawCanvas();
+    if (tooSmall(nl)) toast(smallMsg([nl]).replace(/ Remove or redraw it\.$/, ''));
+    return;
   }
   if (a === 'view') { const id = +act.dataset.id; S.flash = id; drawCanvas(); setTimeout(() => { if (S.flash === id) { S.flash = null; drawCanvas(); } }, 1200); return; }
   if (a === 'del') { const id = +act.dataset.id; return modal('Delete Annotation', 'Are you sure you want to delete this annotation?', 'Confirm', () => { S.labels = S.labels.filter(l => l.id !== id); S.labelsChanged = true; renderBody(); drawCanvas(); }); }
@@ -846,7 +893,6 @@ body.addEventListener('input', e => {
 });
 body.addEventListener('change', e => {
   const t = e.target;
-  if (t.name === 'model') { S.modelId = t.value; renderDynamic(); drawCanvas(); }
   if (t.dataset.gt != null) renderBody();
 });
 $('#brushSize').addEventListener('input', e => { S.brush = +e.target.value; $('#brushVal').textContent = S.brush + ' px'; });
